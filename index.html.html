@@ -1,0 +1,553 @@
+
+<!--
+  Bulk Domain Rating (DR) Checker Widget
+  --------------------------------------
+  Powered by the Ahrefs free public Domain Rating API:
+    GET https://api.ahrefs.com/v3/public/domain-rating-free?target=<domain>&output=json
+  This endpoint is free and requires no API key.
+
+  ATTRIBUTION (required by the Ahrefs Domain Rating License):
+    Data shown is "Domain Rating by Ahrefs" (https://ahrefs.com/).
+    License: http://ahrefs.com/legal/domain-rating-license
+    Do not remove the attribution line at the bottom of the widget.
+
+  INTEGRATION
+  -----------
+  Option A — Drop the markup into a page:
+    Copy everything inside <body> ... </body> into your page (or just the
+    <div id="dr-widget"> block plus the <style> and <script>).
+
+  Option B — Embed as an iframe (most isolated, recommended):
+    <iframe src="dr-checker.html" style="width:100%;max-width:760px;height:760px;border:0"></iframe>
+
+  CORS / PROXY (read this!)
+  -------------------------
+  Browsers may block a direct call to api.ahrefs.com because the endpoint
+  does not send permissive CORS headers. If you see "blocked by CORS" or
+  network errors, set PROXY_URL below to your own tiny proxy. A ready-to-
+  deploy Cloudflare Worker is included in this folder: cloudflare-worker-proxy.js
+  After deploying it, set:  PROXY_URL = "https://your-worker.workers.dev/?target="
+  The widget will then call:  PROXY_URL + encodeURIComponent(domain)
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Bulk Domain Rating Checker</title>
+<style>
+  :root {
+    --drw-bg: #ffffff;
+    --drw-fg: #0f172a;
+    --drw-muted: #64748b;
+    --drw-border: #e2e8f0;
+    --drw-accent: #2563eb;
+    --drw-accent-fg: #ffffff;
+    --drw-soft: #f8fafc;
+    --drw-radius: 14px;
+    --drw-shadow: 0 1px 3px rgba(15,23,42,.08), 0 8px 24px rgba(15,23,42,.06);
+  }
+  #dr-widget * { box-sizing: border-box; }
+  #dr-widget {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    color: var(--drw-fg);
+    background: var(--drw-bg);
+    max-width: 760px;
+    margin: 0 auto;
+    border: 1px solid var(--drw-border);
+    border-radius: var(--drw-radius);
+    box-shadow: var(--drw-shadow);
+    overflow: hidden;
+  }
+  #dr-widget .drw-head {
+    padding: 22px 24px 18px;
+    border-bottom: 1px solid var(--drw-border);
+    background: linear-gradient(180deg, #fbfdff, #ffffff);
+  }
+  #dr-widget .drw-head h2 {
+    margin: 0 0 4px;
+    font-size: 20px;
+    font-weight: 700;
+    letter-spacing: -.01em;
+  }
+  #dr-widget .drw-head p { margin: 0; font-size: 13.5px; color: var(--drw-muted); }
+  #dr-widget .drw-body { padding: 20px 24px 8px; }
+  #dr-widget textarea {
+    width: 100%;
+    min-height: 120px;
+    resize: vertical;
+    padding: 12px 14px;
+    font-size: 14px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    color: var(--drw-fg);
+    border: 1px solid var(--drw-border);
+    border-radius: 10px;
+    background: var(--drw-soft);
+    line-height: 1.5;
+  }
+  #dr-widget textarea:focus { outline: 2px solid rgba(37,99,235,.35); border-color: var(--drw-accent); background:#fff; }
+  #dr-widget .drw-controls {
+    display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
+    margin-top: 12px;
+  }
+  #dr-widget button {
+    font-size: 14px; font-weight: 600; cursor: pointer;
+    border-radius: 10px; padding: 10px 16px; border: 1px solid transparent;
+    transition: transform .04s ease, background .15s ease, opacity .15s ease;
+  }
+  #dr-widget button:active { transform: translateY(1px); }
+  #dr-widget .drw-primary { background: var(--drw-accent); color: var(--drw-accent-fg); }
+  #dr-widget .drw-primary:hover { background: #1d4ed8; }
+  #dr-widget .drw-primary:disabled { opacity: .55; cursor: not-allowed; }
+  #dr-widget .drw-ghost { background: #fff; color: var(--drw-fg); border-color: var(--drw-border); }
+  #dr-widget .drw-ghost:hover { background: var(--drw-soft); }
+  #dr-widget .drw-ghost:disabled { opacity: .5; cursor: not-allowed; }
+  #dr-widget .drw-count { font-size: 12.5px; color: var(--drw-muted); margin-left: auto; }
+
+  #dr-widget .drw-progress {
+    height: 6px; width: 100%; background: var(--drw-soft);
+    border-radius: 999px; overflow: hidden; margin: 16px 0 4px; display: none;
+  }
+  #dr-widget .drw-progress > span {
+    display: block; height: 100%; width: 0%;
+    background: linear-gradient(90deg, #2563eb, #38bdf8);
+    transition: width .25s ease;
+  }
+  #dr-widget .drw-progress-label { font-size: 12px; color: var(--drw-muted); display: none; }
+
+  #dr-widget .drw-results { padding: 8px 24px 4px; }
+  #dr-widget table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  #dr-widget thead th {
+    text-align: left; font-size: 11.5px; text-transform: uppercase; letter-spacing: .04em;
+    color: var(--drw-muted); font-weight: 600; padding: 8px 10px; border-bottom: 1px solid var(--drw-border);
+    cursor: pointer; user-select: none; white-space: nowrap;
+  }
+  #dr-widget thead th .drw-arrow { font-size: 10px; opacity:.6; }
+  #dr-widget tbody td { padding: 10px; border-bottom: 1px solid var(--drw-border); vertical-align: middle; }
+  #dr-widget tbody tr:last-child td { border-bottom: 0; }
+  #dr-widget .drw-domain { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 13px; word-break: break-all; }
+  #dr-widget .drw-badge {
+    display: inline-flex; align-items: center; justify-content: center;
+    min-width: 46px; height: 30px; padding: 0 10px; border-radius: 8px;
+    font-weight: 700; font-size: 15px; color: #fff;
+  }
+  #dr-widget .drw-tier { font-size: 12.5px; color: var(--drw-muted); }
+  #dr-widget .drw-status-err { color: #b91c1c; font-size: 12.5px; }
+  #dr-widget .drw-spin {
+    width: 16px; height: 16px; border: 2px solid var(--drw-border);
+    border-top-color: var(--drw-accent); border-radius: 50%;
+    display: inline-block; animation: drw-rot .7s linear infinite;
+  }
+  @keyframes drw-rot { to { transform: rotate(360deg); } }
+
+  #dr-widget .drw-empty { padding: 28px 24px; text-align: center; color: var(--drw-muted); font-size: 14px; }
+
+  #dr-widget .drw-foot {
+    padding: 14px 24px 18px; border-top: 1px solid var(--drw-border);
+    font-size: 12px; color: var(--drw-muted); display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: space-between;
+  }
+  #dr-widget .drw-foot a { color: var(--drw-accent); text-decoration: none; }
+  #dr-widget .drw-foot a:hover { text-decoration: underline; }
+
+  @media (max-width: 520px) {
+    #dr-widget .drw-tier { display: none; }
+    #dr-widget thead th.drw-th-tier { display: none; }
+    #dr-widget tbody td.drw-td-tier { display: none; }
+  }
+</style>
+</head>
+<body>
+<div id="dr-widget">
+  <div class="drw-head">
+    <h2>Bulk Domain Rating Checker</h2>
+    <p>Paste up to 100 domains (one per line). Powered by the free Ahrefs Domain Rating API. Works straight from this file &mdash; no setup needed.</p>
+  </div>
+
+  <div class="drw-body">
+    <textarea id="drw-input" placeholder="example.com
+ahrefs.com
+wikipedia.org
+github.com"></textarea>
+    <div class="drw-controls">
+      <button class="drw-primary" id="drw-check">Check DR</button>
+      <button class="drw-ghost" id="drw-clear">Clear</button>
+      <button class="drw-ghost" id="drw-csv" disabled>Download CSV</button>
+      <button class="drw-ghost" id="drw-copy" disabled>Copy</button>
+      <span class="drw-count" id="drw-count">0 domains</span>
+    </div>
+    <div class="drw-progress" id="drw-progress"><span></span></div>
+    <div class="drw-progress-label" id="drw-progress-label"></div>
+  </div>
+
+  <div class="drw-results" id="drw-results">
+    <div class="drw-empty" id="drw-empty">Results will appear here.</div>
+  </div>
+
+  <div class="drw-foot">
+    <span>
+      Data: <a href="https://ahrefs.com/" target="_blank" rel="noopener">Domain Rating by Ahrefs</a>
+      &middot; <a href="http://ahrefs.com/legal/domain-rating-license" target="_blank" rel="noopener">License</a>
+    </span>
+    <span id="drw-msg"></span>
+  </div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  /* =========================================================================
+     CONFIG — adjust these for your site
+     ========================================================================= */
+
+  // Direct Ahrefs endpoint. Browsers usually BLOCK this via CORS, so the
+  // widget automatically falls back to the public proxies listed below.
+  var API_ENDPOINT = "https://api.ahrefs.com/v3/public/domain-rating-free";
+
+  // OPTIONAL: your own proxy (ends with "?target="). If set it is tried FIRST,
+  // then the direct call and the public proxies below are used as backup.
+  // Leave it empty ("") when opening this file straight from your desktop —
+  // a relative path like "/.netlify/functions/dr" only resolves on a deployed
+  // Netlify site, so from file:// every request fails. Recommended for production —
+  // deploy the included cloudflare-worker-proxy.js and paste its URL here, e.g.
+  //   var PROXY_URL = "https://dr-proxy.yourname.workers.dev/?target=";
+  var PROXY_URL = "";
+
+  // Built-in public CORS proxies, tried in order when PROXY_URL is empty.
+  // These are free third-party services — great for getting started and light
+  // use, but they can be slow or rate-limited. For reliability at scale, set
+  // PROXY_URL above to your own proxy. Each function wraps the full Ahrefs URL.
+  var PUBLIC_PROXIES = [
+    function (u) { return "https://api.codetabs.com/v1/proxy/?quest=" + encodeURIComponent(u); },
+    function (u) { return "https://api.allorigins.win/raw?url=" + encodeURIComponent(u); },
+    function (u) { return "https://corsproxy.io/?url=" + encodeURIComponent(u); },
+    function (u) { return "https://proxy.corsfix.com/?" + u; },
+    function (u) { return "https://thingproxy.freeboard.io/fetch/" + u; }
+  ];
+
+  // How many domains to fetch at once. Ahrefs default rate limit is 60 req/min,
+  // so we also pace requests with MIN_INTERVAL_MS below.
+  var MAX_CONCURRENCY = 3;
+  var MIN_INTERVAL_MS = 1100;   // ~ stays under 60 requests/minute
+  var MAX_DOMAINS = 100;        // safety cap per run
+  var REQUEST_TIMEOUT_MS = 15000;
+
+  /* ========================================================================= */
+
+  var $ = function (id) { return document.getElementById(id); };
+  var input = $("drw-input");
+  var btnCheck = $("drw-check");
+  var btnClear = $("drw-clear");
+  var btnCsv = $("drw-csv");
+  var btnCopy = $("drw-copy");
+  var countEl = $("drw-count");
+  var resultsEl = $("drw-results");
+  var emptyEl = $("drw-empty");
+  var progressWrap = $("drw-progress");
+  var progressBar = progressWrap.querySelector("span");
+  var progressLabel = $("drw-progress-label");
+  var msgEl = $("drw-msg");
+
+  var results = [];      // { domain, dr, tier, color, status, error }
+  var sortKey = "dr";
+  var sortDir = -1;      // -1 desc, 1 asc
+  var running = false;
+
+  // DR tier bands -> label + color
+  function tierFor(dr) {
+    if (dr >= 86) return { label: "Elite", color: "#7c3aed" };
+    if (dr >= 71) return { label: "Very strong", color: "#2563eb" };
+    if (dr >= 51) return { label: "Strong", color: "#0891b2" };
+    if (dr >= 31) return { label: "Established", color: "#16a34a" };
+    if (dr >= 11) return { label: "Growing", color: "#ca8a04" };
+    return { label: "New / low", color: "#dc2626" };
+  }
+
+  // Normalise user input into a clean host (strip scheme, path, www, spaces)
+  function cleanDomain(raw) {
+    var s = (raw || "").trim().toLowerCase();
+    if (!s) return "";
+    s = s.replace(/^https?:\/\//, "");
+    s = s.replace(/^www\./, "");
+    s = s.split("/")[0].split("?")[0].split("#")[0];
+    s = s.replace(/[, ]+$/, "");
+    return s.trim();
+  }
+
+  function parseInput() {
+    var raw = input.value.split(/[\n,]+/);
+    var seen = {};
+    var out = [];
+    for (var i = 0; i < raw.length; i++) {
+      var d = cleanDomain(raw[i]);
+      if (d && d.indexOf(".") > 0 && !seen[d]) { seen[d] = 1; out.push(d); }
+    }
+    return out;
+  }
+
+  function updateCount() {
+    var n = parseInput().length;
+    countEl.textContent = n + (n === 1 ? " domain" : " domains")
+      + (n > MAX_DOMAINS ? " (only first " + MAX_DOMAINS + " will run)" : "");
+  }
+
+  function setMsg(text, isError) {
+    msgEl.textContent = text || "";
+    msgEl.style.color = isError ? "#b91c1c" : "var(--drw-muted)";
+  }
+
+  // Build the ordered list of URLs to try for one domain.
+  function candidateUrls(domain) {
+    var ahrefs = API_ENDPOINT + "?target=" + encodeURIComponent(domain) + "&output=json";
+    var list = [];
+    // Your own proxy is tried first when set, but is no longer a dead end:
+    // if it fails we still fall through to the direct call and public proxies.
+    if (PROXY_URL) list.push(PROXY_URL + encodeURIComponent(domain));
+    list.push(ahrefs); // direct endpoint (works only if CORS allows)
+    for (var i = 0; i < PUBLIC_PROXIES.length; i++) list.push(PUBLIC_PROXIES[i](ahrefs));
+    return list;
+  }
+
+  function parseDR(text) {
+    var data;
+    try { data = JSON.parse(text); } catch (e) { return null; }
+    var dr = null;
+    if (data && data.domain_rating != null) {
+      dr = (typeof data.domain_rating === "object")
+        ? data.domain_rating.domain_rating
+        : data.domain_rating;
+    }
+    if (dr == null || isNaN(dr)) return null;
+    return Math.round(Number(dr) * 10) / 10;
+  }
+
+  // One fetch attempt against a single URL. Resolves with a DR number or throws.
+  function fetchOnce(url) {
+    var ctrl = ("AbortController" in window) ? new AbortController() : null;
+    var timer = ctrl ? setTimeout(function () { ctrl.abort(); }, REQUEST_TIMEOUT_MS) : null;
+    return fetch(url, {
+      method: "GET",
+      headers: { "Accept": "application/json" },
+      signal: ctrl ? ctrl.signal : undefined
+    }).then(function (res) {
+      if (timer) clearTimeout(timer);
+      if (res.status === 429) throw new Error("Rate limited (429)");
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      return res.text();
+    }).then(function (text) {
+      var dr = parseDR(text);
+      if (dr == null) throw new Error("No DR in response");
+      return dr;
+    }).catch(function (err) {
+      if (timer) clearTimeout(timer);
+      throw err;
+    });
+  }
+
+  // Fetch a domain's DR, trying direct then each public proxy until one works.
+  function fetchDR(domain) {
+    var urls = candidateUrls(domain);
+    var lastErr = "Request failed";
+    function attempt(i) {
+      if (i >= urls.length) {
+        var m = lastErr;
+        if (/Failed to fetch|NetworkError|CORS|No DR/i.test(m)) {
+          m = "Every proxy failed — try again, or set your own PROXY_URL";
+        }
+        return Promise.resolve({ domain: domain, dr: null, tier: "", color: "#94a3b8", status: "error", error: m });
+      }
+      return fetchOnce(urls[i]).then(function (dr) {
+        var t = tierFor(dr);
+        return { domain: domain, dr: dr, tier: t.label, color: t.color, status: "ok", error: "" };
+      }).catch(function (err) {
+        lastErr = (err && err.message) ? err.message : "Request failed";
+        if (err && err.name === "AbortError") lastErr = "Timed out";
+        return attempt(i + 1);
+      });
+    }
+    return attempt(0);
+  }
+
+  // Concurrency-limited, rate-paced runner
+  function runQueue(domains) {
+    return new Promise(function (resolve) {
+      var idx = 0, active = 0, done = 0, lastStart = 0;
+      var total = domains.length;
+
+      function tick() {
+        if (done === total) { resolve(); return; }
+        while (active < MAX_CONCURRENCY && idx < total) {
+          var now = Date.now();
+          var wait = Math.max(0, lastStart + MIN_INTERVAL_MS - now);
+          if (wait > 0) { setTimeout(tick, wait); return; }
+          lastStart = Date.now();
+          active++;
+          (function (domain, position) {
+            fetchDR(domain).then(function (r) {
+              results[position] = r;
+              active--; done++;
+              setProgress(done, total);
+              renderTable();
+              tick();
+            });
+          })(domains[idx], idx);
+          idx++;
+        }
+      }
+      tick();
+    });
+  }
+
+  function setProgress(done, total) {
+    var pct = total ? Math.round((done / total) * 100) : 0;
+    progressBar.style.width = pct + "%";
+    progressLabel.textContent = "Checked " + done + " of " + total;
+  }
+
+  function sortResults() {
+    var arr = results.filter(Boolean).slice();
+    arr.sort(function (a, b) {
+      if (sortKey === "domain") {
+        return a.domain.localeCompare(b.domain) * sortDir;
+      }
+      var av = (a.dr == null) ? -1 : a.dr;
+      var bv = (b.dr == null) ? -1 : b.dr;
+      return (av - bv) * sortDir;
+    });
+    return arr;
+  }
+
+  function arrow(key) {
+    if (sortKey !== key) return "";
+    return ' <span class="drw-arrow">' + (sortDir === -1 ? "▼" : "▲") + "</span>";
+  }
+
+  function renderTable() {
+    var rows = sortResults();
+    if (!rows.length && !running) {
+      resultsEl.innerHTML = '<div class="drw-empty" id="drw-empty">Results will appear here.</div>';
+      return;
+    }
+    var html = '<table><thead><tr>' +
+      '<th data-sort="domain">Domain' + arrow("domain") + '</th>' +
+      '<th data-sort="dr">DR' + arrow("dr") + '</th>' +
+      '<th class="drw-th-tier">Tier</th>' +
+      '</tr></thead><tbody>';
+
+    for (var i = 0; i < rows.length; i++) {
+      var r = rows[i];
+      var drCell, tierCell;
+      if (r.status === "ok") {
+        drCell = '<span class="drw-badge" style="background:' + r.color + '">' + r.dr + '</span>';
+        tierCell = '<span class="drw-tier">' + r.tier + '</span>';
+      } else {
+        drCell = '<span class="drw-status-err">—</span>';
+        tierCell = '<span class="drw-status-err">' + escapeHtml(r.error) + '</span>';
+      }
+      html += '<tr>' +
+        '<td class="drw-domain">' + escapeHtml(r.domain) + '</td>' +
+        '<td>' + drCell + '</td>' +
+        '<td class="drw-td-tier">' + tierCell + '</td>' +
+        '</tr>';
+    }
+
+    // pending placeholders while running
+    if (running) {
+      var doneSet = {};
+      for (var k = 0; k < rows.length; k++) doneSet[rows[k].domain] = 1;
+      // (placeholders are implicit via progress bar; keep table to finished rows)
+    }
+    html += '</tbody></table>';
+    resultsEl.innerHTML = html;
+
+    var ths = resultsEl.querySelectorAll("th[data-sort]");
+    for (var j = 0; j < ths.length; j++) {
+      ths[j].addEventListener("click", function () {
+        var key = this.getAttribute("data-sort");
+        if (sortKey === key) { sortDir *= -1; } else { sortKey = key; sortDir = (key === "domain") ? 1 : -1; }
+        renderTable();
+      });
+    }
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+    });
+  }
+
+  function toCSV() {
+    var rows = sortResults();
+    var lines = ['"domain","domain_rating","tier","status"'];
+    for (var i = 0; i < rows.length; i++) {
+      var r = rows[i];
+      lines.push('"' + r.domain + '","' + (r.dr == null ? "" : r.dr) + '","' +
+        (r.tier || "") + '","' + (r.status === "ok" ? "ok" : "error: " + r.error) + '"');
+    }
+    return lines.join("\n");
+  }
+
+  /* ---- events ---- */
+
+  input.addEventListener("input", updateCount);
+
+  btnClear.addEventListener("click", function () {
+    if (running) return;
+    input.value = ""; results = []; updateCount(); renderTable();
+    btnCsv.disabled = true; btnCopy.disabled = true; setMsg("");
+    progressWrap.style.display = "none"; progressLabel.style.display = "none";
+  });
+
+  btnCheck.addEventListener("click", function () {
+    if (running) return;
+    var domains = parseInput();
+    if (!domains.length) { setMsg("Enter at least one domain.", true); return; }
+    if (domains.length > MAX_DOMAINS) domains = domains.slice(0, MAX_DOMAINS);
+
+    running = true;
+    results = [];
+    btnCheck.disabled = true; btnClear.disabled = true;
+    btnCsv.disabled = true; btnCopy.disabled = true;
+    btnCheck.innerHTML = '<span class="drw-spin"></span>';
+    setMsg("");
+    progressWrap.style.display = "block";
+    progressLabel.style.display = "block";
+    setProgress(0, domains.length);
+    resultsEl.innerHTML = '<div class="drw-empty">Checking ' + domains.length + ' domains…</div>';
+
+    runQueue(domains).then(function () {
+      running = false;
+      btnCheck.disabled = false; btnClear.disabled = false;
+      btnCheck.textContent = "Check DR";
+      var ok = results.filter(function (r) { return r && r.status === "ok"; }).length;
+      var bad = results.filter(function (r) { return r && r.status === "error"; }).length;
+      btnCsv.disabled = ok === 0; btnCopy.disabled = ok === 0;
+      setMsg(ok + " ok" + (bad ? ", " + bad + " failed" : ""), bad > 0);
+      renderTable();
+      setTimeout(function () { progressWrap.style.display = "none"; progressLabel.style.display = "none"; }, 800);
+    });
+  });
+
+  btnCsv.addEventListener("click", function () {
+    var blob = new Blob([toCSV()], { type: "text/csv;charset=utf-8" });
+    var a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "domain-ratings.csv";
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  });
+
+  btnCopy.addEventListener("click", function () {
+    var text = toCSV();
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(function () { setMsg("Copied to clipboard"); });
+    } else {
+      input.focus();
+      setMsg("Copy not supported in this browser", true);
+    }
+  });
+
+  updateCount();
+})();
+</script>
+</body>
+</html>
